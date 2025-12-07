@@ -6,15 +6,18 @@ import argparse
 import logging
 import shutil
 import sys
+from distutils.version import LooseVersion
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union, List
 
 import numpy as np
 import soundfile as sf
 import torch
 from packaging.version import parse as V  # noqa
 from typeguard import typechecked
+
+import torch.quantization
 
 from espnet2.fileio.npy_scp import NpyScpWriter
 from espnet2.gan_codec.dac import DAC
@@ -44,14 +47,44 @@ class AudioCoding:
         device: Union[str, torch.device] = "cpu",
         seed: int = 777,
         always_fix_seed: bool = False,
+        quantize_model: bool = False,
+        quantize_modules: List[str] = ["Linear"],
+        quantize_dtype: str = "qint8",
     ):
         """Initialize AudioCoding module."""
 
+        if quantize_model:
+            if quantize_dtype == "float16" and torch.__version__ < LooseVersion(
+                "1.5.0"
+            ):
+                raise ValueError(
+                    "float16 dtype for dynamic quantization is not supported with "
+                    "torch version < 1.5.0. Switch to qint8 dtype instead."
+                )
+    
         # setup model
         model, train_args = GANCodecTask.build_model_from_file(
             train_config, model_file, device
         )
         model.to(dtype=getattr(torch, dtype)).eval()
+
+        # quantization
+        qconfig_spec = set([getattr(torch.nn, q) for q in quantize_modules])
+        quantize_dtype: torch.dtype = getattr(torch, quantize_dtype)
+
+        if quantize_model:
+            logging.info("Use quantized model.")
+
+            # Remove nn.utils.weight_norm (can't be quantized)
+            for module in model.modules():
+                if hasattr(module, 'weight_g') and hasattr(module, 'weight_v'):
+                    torch.nn.utils.remove_weight_norm(module)
+                    logging.info(f"{module}: Removed weight norm for quantization")
+
+            model = torch.quantization.quantize_dynamic(
+                model, qconfig_spec=qconfig_spec, dtype=quantize_dtype
+            )
+
         self.device = device
         self.dtype = dtype
         self.train_args = train_args
@@ -184,6 +217,9 @@ def inference(
     encode_only: bool,
     always_fix_seed: bool,
     allow_variable_data_keys: bool,
+    quantize_model: bool,
+    quantize_modules: List[str],
+    quantize_dtype: str,
 ):
     """Run speech coding inference."""
     if batch_size > 1:
@@ -212,6 +248,9 @@ def inference(
         device=device,
         seed=seed,
         always_fix_seed=always_fix_seed,
+        quantize_model=quantize_model,
+        quantize_modules=quantize_modules,
+        quantize_dtype=quantize_dtype,
     )
     audio_coding = AudioCoding.from_pretrained(
         model_tag=model_tag,
@@ -386,6 +425,32 @@ def get_parser():
         default=False,
         help="Whether to always fix seed",
     )
+
+    group = parser.add_argument_group("Quantization related")
+    group.add_argument(
+        "--quantize_model",
+        type=str2bool,
+        default=False,
+        help="Apply dynamic quantization to the model.",
+    )
+    group.add_argument(
+        "--quantize_modules",
+        type=str,
+        nargs="*",
+        default=["Linear"],
+        help="""List of modules to be dynamically quantized.
+        E.g.: --quantize_modules=[Linear,LSTM,GRU].
+        Each specified module should be an attribute of 'torch.nn', e.g.:
+        torch.nn.Linear, torch.nn.LSTM, torch.nn.GRU, ...""",
+    )
+    group.add_argument(
+        "--quantize_dtype",
+        type=str,
+        default="qint8",
+        choices=["float16", "qint8"],
+        help="Dtype for dynamic quantization.",
+    )
+
     return parser
 
 
