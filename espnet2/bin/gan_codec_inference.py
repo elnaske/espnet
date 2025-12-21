@@ -17,8 +17,6 @@ import torch
 from packaging.version import parse as V  # noqa
 from typeguard import typechecked
 
-import torch.quantization
-
 from espnet2.fileio.npy_scp import NpyScpWriter
 from espnet2.gan_codec.dac import DAC
 from espnet2.gan_codec.soundstream import SoundStream
