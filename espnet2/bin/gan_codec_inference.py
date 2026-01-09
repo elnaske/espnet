@@ -59,7 +59,7 @@ class AudioCoding:
                     "float16 dtype for dynamic quantization is not supported with "
                     "torch version < 1.5.0. Switch to qint8 dtype instead."
                 )
-    
+
         # setup model
         model, train_args = GANCodecTask.build_model_from_file(
             train_config, model_file, device
@@ -67,13 +67,21 @@ class AudioCoding:
         model.to(dtype=getattr(torch, dtype)).eval()
 
         # quantization
-        qconfig_spec = set([getattr(torch.nn, q) for q in quantize_modules])
+        if "all" in [q.lower() for q in quantize_modules]:
+            if len(quantize_modules) > 1:
+                raise ValueError(
+                    "quantize_modules cannot contain both 'all' and other arguments. "
+                    "Either use only 'all' or specify a list of modules."
+                )
+            qconfig_spec = None
+        else:
+            qconfig_spec = set([getattr(torch.nn, q) for q in quantize_modules])
         quantize_dtype: torch.dtype = getattr(torch, quantize_dtype)
 
         if quantize_model:
             logging.info("Use quantized model.")
 
-            # Remove nn.utils.weight_norm (can't be quantized)
+            # Remove nn.utils.weight_norm (prevent quantization, even if not quantized themselves)
             for module in model.modules():
                 if hasattr(module, 'weight_g') and hasattr(module, 'weight_v'):
                     torch.nn.utils.remove_weight_norm(module)
@@ -439,7 +447,8 @@ def get_parser():
         help="""List of modules to be dynamically quantized.
         E.g.: --quantize_modules=[Linear,LSTM,GRU].
         Each specified module should be an attribute of 'torch.nn', e.g.:
-        torch.nn.Linear, torch.nn.LSTM, torch.nn.GRU, ...""",
+        torch.nn.Linear, torch.nn.LSTM, torch.nn.GRU, ...
+        Alternatively, use 'all' to quantize all modules.""",
     )
     group.add_argument(
         "--quantize_dtype",
